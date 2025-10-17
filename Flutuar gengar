@@ -1,5 +1,6 @@
--- HUD de Flutuação com Movimento Direcional, Inclinação Persistente 245°, Toggle, Voltar, Voo Livre, Órbita Circular e Controle de Velocidade
--- ✅ CORRIGIDO: Inclinação agora é PERSISTENTE mesmo após "slap" ou anti-slap. Aplicada continuamente no loop e em eventos de reset.
+-- ✅ MODIFICADO: Proteção contra teleporte, bring e fling (reforçada) ativa desde a execução do script
+-- ✅ CORRIGIDO: Renasce na última posição válida, reativa flutuar com reset, proteção total contra :fling
+-- ✅ ADICIONADO: Manipulação automática de flutuar na morte e respawn (desativa na morte, espera respawn, renasce no mesmo lugar, reativa automaticamente se estava ON)
 local Players        = game:GetService("Players")
 local RunService     = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
@@ -11,6 +12,7 @@ if gui:FindFirstChild("SimpleFloatHUD") then return end
 
 -- Parâmetros
 local floating       = false
+local wasFloating    = false -- Armazena se flutuar estava ativo antes da morte
 local connHeartbeat  = nil
 local floatTempo     = 0        -- Tempo para oscilação vertical
 local orbitTempo     = 0        -- Tempo para órbita
@@ -24,7 +26,7 @@ local orbitFrequency = baseOrbitFrequency * speedFactor  -- Frequência efetiva 
 local orbitRadius    = 6.0      -- Raio da órbita (studs) - Preset
 local orbitCenter    = nil      -- Centro dinâmico da órbita
 local basePosition   = nil      -- Posição base para oscilação
-local pitchOffset    = 245      -- ✅ INCLINAÇÃO CORRIGIDA: 245° (persistente)
+local pitchOffset    = 245      -- INCLINAÇÃO CORRIGIDA: 245° (persistente)
 local defaultSpeed   = 8        -- Velocidade normal
 local floatSpeed     = 30       -- Velocidade ao flutuar/voar
 local moveSpeed      = defaultSpeed
@@ -34,22 +36,50 @@ local flyUp          = false     -- Estado de subida
 local flyDown        = false     -- Estado de descida
 local flySpeed       = 20       -- Velocidade vertical de voo
 local isMobile       = UserInputService.TouchEnabled -- Detecta dispositivo móvel
+local lastValidPosition = nil   -- Última posição válida para prevenção de teleporte
+local lastValidVelocity = Vector3.new() -- Última velocidade válida para proteção contra fling
 
--- ✅ NOVA: Conexões para persistência de inclinação
+-- Conexões
 local connHumanoidState = nil
 local connRootPartChanged = nil
+local connAntiTeleport = nil
+local connHumanoidDied = nil
+local toggleBtn = nil -- Referência ao botão de toggle para atualizar a HUD
 
--- Função para aplicar rotação persistentemente
+-- Função para aplicar rotação persistentemente (usada apenas no modo flutuar)
 local function applyPersistentRotation(hrp)
     if not floating then return end
     local rot = CFrame.Angles(0, math.rad(lastYaw), 0) * CFrame.Angles(math.rad(90 + pitchOffset), 0, 0)
     hrp.CFrame = CFrame.new(hrp.Position) * rot
 end
 
+-- Função para prevenir teleporte, bring e fling
+local function preventTeleportAndFling()
+    local char = player.Character
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    local humanoid = char:FindFirstChild("Humanoid")
+    if not hrp or not humanoid then return end
+
+    -- Zera velocidades para prevenir fling
+    if hrp.Velocity.Magnitude > 50 or hrp.AssemblyLinearVelocity.Magnitude > 50 then
+        hrp.Velocity = Vector3.new()
+        hrp.AssemblyLinearVelocity = Vector3.new()
+    end
+
+    -- Reverte teleportes para a última posição válida
+    if lastValidPosition and (hrp.Position - lastValidPosition).Magnitude > 50 then
+        hrp.CFrame = CFrame.new(lastValidPosition)
+    end
+    lastValidPosition = hrp.Position
+    lastValidVelocity = hrp.Velocity
+end
+
 -- Inicia a flutuação com movimento, direção, voo livre e órbita circular
 local function startFloating()
     if floating then return end
     floating    = true
+    wasFloating = true -- Marca que flutuar está ativo
     floatTempo  = 0
     orbitTempo  = 0
     moveSpeed   = floatSpeed
@@ -63,8 +93,9 @@ local function startFloating()
     humanoid.PlatformStand = true
     basePosition = hrp.Position
     orbitCenter  = hrp.Position
+    lastValidPosition = hrp.Position
 
-    -- ✅ NOVA: Monitora mudanças no estado do Humanoid para reaplicar inclinação após slap
+    -- Monitora mudanças no estado do Humanoid para reaplicar inclinação após slap
     connHumanoidState = humanoid.StateChanged:Connect(function(oldState, newState)
         if floating and newState == Enum.HumanoidStateType.Physics then
             task.wait(0.1) -- Pequeno delay para evitar conflito
@@ -73,7 +104,7 @@ local function startFloating()
         end
     end)
 
-    -- ✅ NOVA: Monitora mudanças no CFrame do RootPart para reaplicar inclinação
+    -- Monitora mudanças no CFrame do RootPart para reaplicar inclinação
     connRootPartChanged = hrp:GetPropertyChangedSignal("CFrame"):Connect(function()
         if floating then
             task.wait() -- Yield para próximo frame
@@ -112,17 +143,16 @@ local function startFloating()
 
         -- Monta posição com órbita e oscilação
         local targetPos = orbitCenter + Vector3.new(orbitX, yOff, orbitZ)
-        hrp.Velocity            = Vector3.new()
-        hrp.AssemblyLinearVelocity = Vector3.new()
         
-        -- ✅ CORRIGIDO: Usa pitchOffset atualizado em TEMPO REAL
+        -- Usa pitchOffset atualizado em TEMPO REAL
         local rot = CFrame.Angles(0, math.rad(lastYaw), 0)
                    * CFrame.Angles(math.rad(90 + pitchOffset), 0, 0)
 
-        -- Aplica a posição e rotação suavemente
-        hrp.CFrame = hrp.CFrame:Lerp(CFrame.new(targetPos) * rot, 0.1)
+        -- Aplica a posição e rotação diretamente
+        hrp.CFrame = CFrame.new(targetPos) * rot
+        lastValidPosition = targetPos -- Atualiza a última posição válida
         
-        -- ✅ NOVA: Reaplica inclinação extra para persistência contra anti-slap
+        -- Reaplica inclinação extra para persistência contra anti-slap
         applyPersistentRotation(hrp)
     end)
 end
@@ -142,6 +172,7 @@ local function stopFloating()
         connRootPartChanged = nil
     end
     floating   = false
+    wasFloating = false -- Marca que flutuar está desativado
     floatTempo = 0
     orbitTempo = 0
     moveSpeed  = defaultSpeed
@@ -164,32 +195,68 @@ local function teleportBack()
     basePosition = lastPosition
     orbitCenter = lastPosition
     hrp.CFrame   = CFrame.new(lastPosition)
+    lastValidPosition = lastPosition -- Atualiza a última posição válida
 end
 
--- Detecta teleporte e atualiza basePosition e orbitCenter
-local function onCharacterTeleport()
-    local char = player.Character
-    if not char then return end
+-- Função para configurar personagem após spawn
+local function setupCharacter(char)
+    local humanoid = char:WaitForChild("Humanoid")
     local hrp = char:WaitForChild("HumanoidRootPart")
-    if floating then
-        basePosition = hrp.Position
-        orbitCenter = hrp.Position
-        lastPosition = hrp.Position
-        applyPersistentRotation(hrp) -- ✅ NOVA: Reaplica após teleporte
+
+    -- Espera um pouco para o personagem carregar completamente e renascer
+    task.wait(0.5)
+
+    -- Renasce na última posição válida
+    if lastValidPosition then
+        hrp.CFrame = CFrame.new(lastValidPosition)
     end
+    lastValidPosition = hrp.Position
+
+    -- Monitora morte do personagem
+    if connHumanoidDied then
+        connHumanoidDied:Disconnect()
+    end
+    connHumanoidDied = humanoid.Died:Connect(function()
+        wasFloating = floating -- Salva o estado de flutuar antes da morte
+        if floating then
+            stopFloating() -- Desativa flutuar imediatamente na morte para não bugar respawn
+            if toggleBtn then
+                toggleBtn.Text = "Flutuar: OFF"
+                toggleBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+                if isMobile and flyUpBtn and flyDownBtn then
+                    flyUpBtn.Visible = false
+                    flyDownBtn.Visible = false
+                end
+            end
+        end
+    end)
+
+    -- Reativa flutuar automaticamente se estava ativo antes da morte
+    if wasFloating then
+        -- Garante que está desativado (redundante, mas para reset)
+        stopFloating()
+        -- Espera um pouco para estabilizar após renascer
+        task.wait(7)
+        startFloating()
+        if toggleBtn then
+            toggleBtn.Text = "Flutuar: ON"
+            toggleBtn.BackgroundColor3 = Color3.fromRGB(0, 150, 0)
+            if isMobile and flyUpBtn and flyDownBtn then
+                flyUpBtn.Visible = true
+                flyDownBtn.Visible = true
+            end
+        end
+    end
+
+    -- Inicia proteção contra teleporte e fling
+    if connAntiTeleport then
+        connAntiTeleport:Disconnect()
+    end
+    connAntiTeleport = RunService.Heartbeat:Connect(preventTeleportAndFling)
 end
 
--- Conexão para detectar mudanças na posição do personagem (teleporte)
-player.CharacterAdded:Connect(function(char)
-    local hrp = char:WaitForChild("HumanoidRootPart")
-    local lastPos = hrp.Position
-    RunService.Heartbeat:Connect(function()
-        if (hrp.Position - lastPos).Magnitude > 50 then
-            onCharacterTeleport()
-        end
-        lastPos = hrp.Position
-    end)
-end)
+-- Conexão para detectar spawn do personagem
+player.CharacterAdded:Connect(setupCharacter)
 
 -- Controles de voo para mobile (e PC como fallback)
 local function setupFlyControls()
@@ -251,7 +318,7 @@ title.TextSize          = 18
 title.TextColor3        = Color3.new(1, 1, 1)
 
 -- Botão ligar/desligar
-local toggleBtn = Instance.new("TextButton", frame)
+toggleBtn = Instance.new("TextButton", frame)
 toggleBtn.Size          = UDim2.new(0.6, 0, 0, 30)
 toggleBtn.Position      = UDim2.new(0.2, 0, 0, 30)
 toggleBtn.Text          = "Flutuar: OFF"
@@ -510,4 +577,9 @@ if isMobile then
     flyDownBtn.Visible = false
 else
     setupFlyControls()
+end
+
+-- Inicia a proteção imediatamente se o personagem já estiver carregado
+if player.Character then
+    setupCharacter(player.Character)
 end
