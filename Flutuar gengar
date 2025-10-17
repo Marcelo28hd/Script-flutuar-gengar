@@ -1,4 +1,5 @@
--- HUD de Flutuação com Movimento Direcional, Inclinação 250°, Toggle, Voltar e Voo Livre
+-- HUD de Flutuação com Movimento Direcional, Inclinação Persistente 245°, Toggle, Voltar, Voo Livre, Órbita Circular e Controle de Velocidade
+-- ✅ CORRIGIDO: Inclinação agora é PERSISTENTE mesmo após "slap" ou anti-slap. Aplicada continuamente no loop e em eventos de reset.
 local Players        = game:GetService("Players")
 local RunService     = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
@@ -11,27 +12,46 @@ if gui:FindFirstChild("SimpleFloatHUD") then return end
 -- Parâmetros
 local floating       = false
 local connHeartbeat  = nil
-local tempo          = 0
-local amplitude      = 2.5      -- altura máxima da oscilação (studs) - alterado para 2.5 como referência
-local base_freq_factor = 2.5 * 0.5  -- Fator para manter velocidade máxima constante (amp_ref * freq_ref)
-local frequency      = base_freq_factor / amplitude  -- frequência ajustada dinamicamente
-local basePosition   = nil
-local pitchOffset    = 250      -- inclinação inicial (graus em X)
-local defaultSpeed   = 8        -- velocidade normal
-local floatSpeed     = 30       -- velocidade ao flutuar/voar
+local floatTempo     = 0        -- Tempo para oscilação vertical
+local orbitTempo     = 0        -- Tempo para órbita
+local amplitude      = 3.0      -- Altura máxima da oscilação (studs) - Preset
+local base_freq_factor = 2.5 * 0.5  -- Fator para oscilação
+local baseFloatFrequency = base_freq_factor / amplitude  -- Frequência base da oscilação
+local baseOrbitFrequency = 0.5  -- Frequência base da órbita
+local speedFactor    = 0.6      -- Fator de velocidade (0.5x a 2.0x) - Preset
+local floatFrequency = baseFloatFrequency * speedFactor  -- Frequência efetiva da oscilação
+local orbitFrequency = baseOrbitFrequency * speedFactor  -- Frequência efetiva da órbita
+local orbitRadius    = 6.0      -- Raio da órbita (studs) - Preset
+local orbitCenter    = nil      -- Centro dinâmico da órbita
+local basePosition   = nil      -- Posição base para oscilação
+local pitchOffset    = 245      -- ✅ INCLINAÇÃO CORRIGIDA: 245° (persistente)
+local defaultSpeed   = 8        -- Velocidade normal
+local floatSpeed     = 30       -- Velocidade ao flutuar/voar
 local moveSpeed      = defaultSpeed
-local lastYaw        = 0        -- lembra última direção
-local lastPosition   = nil      -- armazena posição antes de flutuar
-local flyUp          = false    -- estado de subida
-local flyDown        = false    -- estado de descida
-local flySpeed       = 20       -- velocidade vertical de voo
-local isMobile       = UserInputService.TouchEnabled -- detecta dispositivo móvel
+local lastYaw        = 0        -- Última direção
+local lastPosition   = nil      -- Posição antes de flutuar
+local flyUp          = false     -- Estado de subida
+local flyDown        = false     -- Estado de descida
+local flySpeed       = 20       -- Velocidade vertical de voo
+local isMobile       = UserInputService.TouchEnabled -- Detecta dispositivo móvel
 
--- Inicia a flutuação com movimento, direção e voo livre
+-- ✅ NOVA: Conexões para persistência de inclinação
+local connHumanoidState = nil
+local connRootPartChanged = nil
+
+-- Função para aplicar rotação persistentemente
+local function applyPersistentRotation(hrp)
+    if not floating then return end
+    local rot = CFrame.Angles(0, math.rad(lastYaw), 0) * CFrame.Angles(math.rad(90 + pitchOffset), 0, 0)
+    hrp.CFrame = CFrame.new(hrp.Position) * rot
+end
+
+-- Inicia a flutuação com movimento, direção, voo livre e órbita circular
 local function startFloating()
     if floating then return end
     floating    = true
-    tempo       = 0
+    floatTempo  = 0
+    orbitTempo  = 0
     moveSpeed   = floatSpeed
 
     local char     = player.Character or player.CharacterAdded:Wait()
@@ -42,37 +62,68 @@ local function startFloating()
     lastPosition = hrp.Position
     humanoid.PlatformStand = true
     basePosition = hrp.Position
+    orbitCenter  = hrp.Position
+
+    -- ✅ NOVA: Monitora mudanças no estado do Humanoid para reaplicar inclinação após slap
+    connHumanoidState = humanoid.StateChanged:Connect(function(oldState, newState)
+        if floating and newState == Enum.HumanoidStateType.Physics then
+            task.wait(0.1) -- Pequeno delay para evitar conflito
+            applyPersistentRotation(hrp)
+            humanoid.PlatformStand = true
+        end
+    end)
+
+    -- ✅ NOVA: Monitora mudanças no CFrame do RootPart para reaplicar inclinação
+    connRootPartChanged = hrp:GetPropertyChangedSignal("CFrame"):Connect(function()
+        if floating then
+            task.wait() -- Yield para próximo frame
+            applyPersistentRotation(hrp)
+        end
+    end)
 
     connHeartbeat = RunService.Heartbeat:Connect(function(dt)
-        tempo = tempo + dt
+        floatTempo = floatTempo + dt
+        orbitTempo = orbitTempo + dt
 
-        -- Oscilação vertical (flutuação)
-        local yOff = math.sin(tempo * 2 * math.pi * frequency) * amplitude
+        -- Oscilação vertical
+        local yOff = math.sin(floatTempo * 2 * math.pi * floatFrequency) * amplitude
+
+        -- Movimento orbital circular no plano XZ
+        local orbitX = math.cos(orbitTempo * 2 * math.pi * orbitFrequency) * orbitRadius
+        local orbitZ = math.sin(orbitTempo * 2 * math.pi * orbitFrequency) * orbitRadius
 
         -- Direção de movimento no plano XZ
         local dir = humanoid.MoveDirection
         if dir.Magnitude > 0.1 then
-            -- Calcula yaw corretamente
             lastYaw = math.deg(math.atan2(-dir.X, -dir.Z))
-            -- Move no plano XZ
-            basePosition = basePosition + Vector3.new(dir.X, 0, dir.Z) * moveSpeed * dt
+            local moveDelta = Vector3.new(dir.X, 0, dir.Z) * moveSpeed * dt
+            basePosition = basePosition + moveDelta
+            orbitCenter = orbitCenter + moveDelta
         end
 
         -- Movimento vertical (voo livre)
         if flyUp then
             basePosition = basePosition + Vector3.new(0, flySpeed * dt, 0)
+            orbitCenter = orbitCenter + Vector3.new(0, flySpeed * dt, 0)
         elseif flyDown then
             basePosition = basePosition + Vector3.new(0, -flySpeed * dt, 0)
+            orbitCenter = orbitCenter + Vector3.new(0, -flySpeed * dt, 0)
         end
 
-        -- Monta posição e rotação
-        local targetPos = basePosition + Vector3.new(0, yOff, 0)
+        -- Monta posição com órbita e oscilação
+        local targetPos = orbitCenter + Vector3.new(orbitX, yOff, orbitZ)
         hrp.Velocity            = Vector3.new()
         hrp.AssemblyLinearVelocity = Vector3.new()
+        
+        -- ✅ CORRIGIDO: Usa pitchOffset atualizado em TEMPO REAL
         local rot = CFrame.Angles(0, math.rad(lastYaw), 0)
                    * CFrame.Angles(math.rad(90 + pitchOffset), 0, 0)
 
-        hrp.CFrame = CFrame.new(targetPos) * rot
+        -- Aplica a posição e rotação suavemente
+        hrp.CFrame = hrp.CFrame:Lerp(CFrame.new(targetPos) * rot, 0.1)
+        
+        -- ✅ NOVA: Reaplica inclinação extra para persistência contra anti-slap
+        applyPersistentRotation(hrp)
     end)
 end
 
@@ -82,8 +133,17 @@ local function stopFloating()
         connHeartbeat:Disconnect()
         connHeartbeat = nil
     end
+    if connHumanoidState then
+        connHumanoidState:Disconnect()
+        connHumanoidState = nil
+    end
+    if connRootPartChanged then
+        connRootPartChanged:Disconnect()
+        connRootPartChanged = nil
+    end
     floating   = false
-    tempo      = 0
+    floatTempo = 0
+    orbitTempo = 0
     moveSpeed  = defaultSpeed
     flyUp      = false
     flyDown    = false
@@ -99,21 +159,23 @@ local function teleportBack()
     if not lastPosition then return end
     local char = player.Character or player.CharacterAdded:Wait()
     local hrp  = char:WaitForChild("HumanoidRootPart")
-    -- Desativa momento antes de setar CFrame
     hrp.Velocity            = Vector3.new()
     hrp.AssemblyLinearVelocity = Vector3.new()
     basePosition = lastPosition
+    orbitCenter = lastPosition
     hrp.CFrame   = CFrame.new(lastPosition)
 end
 
--- Detecta teleporte e atualiza basePosition
+-- Detecta teleporte e atualiza basePosition e orbitCenter
 local function onCharacterTeleport()
     local char = player.Character
     if not char then return end
     local hrp = char:WaitForChild("HumanoidRootPart")
     if floating then
         basePosition = hrp.Position
+        orbitCenter = hrp.Position
         lastPosition = hrp.Position
+        applyPersistentRotation(hrp) -- ✅ NOVA: Reaplica após teleporte
     end
 end
 
@@ -122,7 +184,7 @@ player.CharacterAdded:Connect(function(char)
     local hrp = char:WaitForChild("HumanoidRootPart")
     local lastPos = hrp.Position
     RunService.Heartbeat:Connect(function()
-        if (hrp.Position - lastPos).Magnitude > 50 then -- Detecta teleporte por grande mudança de posição
+        if (hrp.Position - lastPos).Magnitude > 50 then
             onCharacterTeleport()
         end
         lastPos = hrp.Position
@@ -172,7 +234,7 @@ Instance.new("UICorner", toggleUIBtn).CornerRadius = UDim.new(0, 6)
 
 -- Frame principal da HUD
 local frame = Instance.new("Frame", screenGui)
-frame.Size              = UDim2.new(0, 220, 0, 240)
+frame.Size              = UDim2.new(0, 220, 0, 340)
 frame.Position          = UDim2.new(0, 20, 0, 20)
 frame.BackgroundColor3  = Color3.fromRGB(30, 30, 30)
 frame.BackgroundTransparency = 0.1
@@ -183,7 +245,7 @@ local title = Instance.new("TextLabel", frame)
 title.Size              = UDim2.new(1, 0, 0, 25)
 title.Position          = UDim2.new(0, 0, 0, 0)
 title.BackgroundTransparency = 1
-title.Text              = "HUD Flutuar"
+title.Text              = "HUD Flutuar e Orbitar"
 title.Font              = Enum.Font.GothamBold
 title.TextSize          = 18
 title.TextColor3        = Color3.new(1, 1, 1)
@@ -261,10 +323,72 @@ plusYBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
 plusYBtn.TextColor3  = Color3.new(1, 1, 1)
 Instance.new("UICorner", plusYBtn).CornerRadius = UDim.new(0, 6)
 
+-- Label de raio da órbita
+local orbitLabel = Instance.new("TextLabel", frame)
+orbitLabel.Size          = UDim2.new(0.6, 0, 0, 20)
+orbitLabel.Position      = UDim2.new(0.2, 0, 0, 190)
+orbitLabel.Text          = "Raio Órbita: " .. string.format("%.1f", orbitRadius)
+orbitLabel.Font          = Enum.Font.Gotham
+orbitLabel.TextSize      = 14
+orbitLabel.TextColor3    = Color3.new(1, 1, 1)
+orbitLabel.BackgroundTransparency = 1
+
+-- Botões + / - de raio da órbita
+local minusOrbitBtn = Instance.new("TextButton", frame)
+minusOrbitBtn.Size          = UDim2.new(0.2, 0, 0, 25)
+minusOrbitBtn.Position      = UDim2.new(0.05, 0, 0, 210)
+minusOrbitBtn.Text          = "–"
+minusOrbitBtn.Font          = Enum.Font.GothamBold
+minusOrbitBtn.TextSize      = 20
+minusOrbitBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+minusOrbitBtn.TextColor3    = Color3.new(1, 1, 1)
+Instance.new("UICorner", minusOrbitBtn).CornerRadius = UDim.new(0, 6)
+
+local plusOrbitBtn = Instance.new("TextButton", frame)
+plusOrbitBtn.Size           = UDim2.new(0.2, 0, 0, 25)
+plusOrbitBtn.Position       = UDim2.new(0.75, 0, 0, 210)
+plusOrbitBtn.Text           = "+"
+plusOrbitBtn.Font           = Enum.Font.GothamBold
+plusOrbitBtn.TextSize       = 20
+plusOrbitBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+plusOrbitBtn.TextColor3     = Color3.new(1, 1, 1)
+Instance.new("UICorner", plusOrbitBtn).CornerRadius = UDim.new(0, 6)
+
+-- Label de velocidade
+local speedLabel = Instance.new("TextLabel", frame)
+speedLabel.Size          = UDim2.new(0.6, 0, 0, 20)
+speedLabel.Position      = UDim2.new(0.2, 0, 0, 250)
+speedLabel.Text          = "Velocidade: " .. string.format("%.1fx", speedFactor)
+speedLabel.Font          = Enum.Font.Gotham
+speedLabel.TextSize      = 14
+speedLabel.TextColor3    = Color3.new(1, 1, 1)
+speedLabel.BackgroundTransparency = 1
+
+-- Botões + / - de velocidade
+local minusSpeedBtn = Instance.new("TextButton", frame)
+minusSpeedBtn.Size          = UDim2.new(0.2, 0, 0, 25)
+minusSpeedBtn.Position      = UDim2.new(0.05, 0, 0, 270)
+minusSpeedBtn.Text          = "–"
+minusSpeedBtn.Font          = Enum.Font.GothamBold
+minusSpeedBtn.TextSize      = 20
+minusSpeedBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+minusSpeedBtn.TextColor3    = Color3.new(1, 1, 1)
+Instance.new("UICorner", minusSpeedBtn).CornerRadius = UDim.new(0, 6)
+
+local plusSpeedBtn = Instance.new("TextButton", frame)
+plusSpeedBtn.Size           = UDim2.new(0.2, 0, 0, 25)
+plusSpeedBtn.Position       = UDim2.new(0.75, 0, 0, 270)
+plusSpeedBtn.Text           = "+"
+plusSpeedBtn.Font           = Enum.Font.GothamBold
+plusSpeedBtn.TextSize       = 20
+plusSpeedBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+plusSpeedBtn.TextColor3     = Color3.new(1, 1, 1)
+Instance.new("UICorner", plusSpeedBtn).CornerRadius = UDim.new(0, 6)
+
 -- Botão "Voltar"
 local backBtn = Instance.new("TextButton", frame)
 backBtn.Size              = UDim2.new(0.6, 0, 0, 30)
-backBtn.Position          = UDim2.new(0.2, 0, 0, 185)
+backBtn.Position          = UDim2.new(0.2, 0, 0, 305)
 backBtn.Text              = "Voltar"
 backBtn.Font              = Enum.Font.Gotham
 backBtn.TextSize          = 16
@@ -321,12 +445,14 @@ end)
 
 minusBtn.MouseButton1Click:Connect(function()
     amplitude = math.max(amplitude - 0.5, 0.5)
-    frequency = base_freq_factor / amplitude
+    baseFloatFrequency = base_freq_factor / amplitude
+    floatFrequency = baseFloatFrequency * speedFactor
     ampLabel.Text = "Altura: " .. string.format("%.1f", amplitude)
 end)
 plusBtn.MouseButton1Click:Connect(function()
     amplitude = math.min(amplitude + 0.5, 10)
-    frequency = base_freq_factor / amplitude
+    baseFloatFrequency = base_freq_factor / amplitude
+    floatFrequency = baseFloatFrequency * speedFactor
     ampLabel.Text = "Altura: " .. string.format("%.1f", amplitude)
 end)
 
@@ -337,6 +463,28 @@ end)
 plusYBtn.MouseButton1Click:Connect(function()
     pitchOffset = (pitchOffset + 5) % 360
     pitchLabel.Text = "Inclinação: " .. pitchOffset .. "°"
+end)
+
+minusOrbitBtn.MouseButton1Click:Connect(function()
+    orbitRadius = math.max(orbitRadius - 0.5, 0.5)
+    orbitLabel.Text = "Raio Órbita: " .. string.format("%.1f", orbitRadius)
+end)
+plusOrbitBtn.MouseButton1Click:Connect(function()
+    orbitRadius = math.min(orbitRadius + 0.5, 20)
+    orbitLabel.Text = "Raio Órbita: " .. string.format("%.1f", orbitRadius)
+end)
+
+minusSpeedBtn.MouseButton1Click:Connect(function()
+    speedFactor = math.max(speedFactor - 0.1, 0.5)
+    floatFrequency = baseFloatFrequency * speedFactor
+    orbitFrequency = baseOrbitFrequency * speedFactor
+    speedLabel.Text = "Velocidade: " .. string.format("%.1fx", speedFactor)
+end)
+plusSpeedBtn.MouseButton1Click:Connect(function()
+    speedFactor = math.min(speedFactor + 0.1, 2.0)
+    floatFrequency = baseFloatFrequency * speedFactor
+    orbitFrequency = baseOrbitFrequency * speedFactor
+    speedLabel.Text = "Velocidade: " .. string.format("%.1fx", speedFactor)
 end)
 
 backBtn.MouseButton1Click:Connect(teleportBack)
@@ -358,9 +506,8 @@ if isMobile then
     flyDownBtn.MouseButton1Up:Connect(function()
         flyDown = false
     end)
-    -- Inicialmente ocultar botões até ativar flutuação
     flyUpBtn.Visible = false
     flyDownBtn.Visible = false
 else
-    setupFlyControls() -- Configura controles para PC
+    setupFlyControls()
 end
